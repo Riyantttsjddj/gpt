@@ -70,6 +70,7 @@ app.get('/', auth, (req, res) => {
 
 app.post('/login', (req, res) => {
   const { username, password } = req.body;
+  // Untuk demo, semua login berhasil tanpa password cek
   if (username) {
     req.session.user = username;
     const db = loadData();
@@ -90,7 +91,7 @@ app.get('/history', auth, (req, res) => {
   const db = loadData();
   const user = req.session.user;
   const chats = (db[user] && db[user].chats) || [];
-  res.json(chats.slice(-20));
+  res.json(chats.slice(-20)); // 20 chat terakhir
 });
 
 app.post('/chat', auth, (req, res) => {
@@ -99,8 +100,11 @@ app.post('/chat', auth, (req, res) => {
   const db = loadData();
   if (!db[user]) db[user] = { chats: [] };
 
+  // Simpan pertanyaan dulu, jawaban kosong sementara
   db[user].chats.push({ q: msg, a: null, timestamp: Date.now() });
   saveData(db);
+
+  // Kirim prompt ke frontend supaya panggil Puter.js
   res.json({ prompt: msg });
 });
 
@@ -110,6 +114,7 @@ app.post('/save_reply', auth, (req, res) => {
   const db = loadData();
   if (!db[user]) db[user] = { chats: [] };
 
+  // Cari pertanyaan terakhir yang sama dan belum ada jawaban
   for (let i = db[user].chats.length - 1; i >= 0; i--) {
     if (db[user].chats[i].q === question && !db[user].chats[i].a) {
       db[user].chats[i].a = answer;
@@ -120,20 +125,12 @@ app.post('/save_reply', auth, (req, res) => {
   res.json({ status: 'ok' });
 });
 
-app.post('/clear', auth, (req, res) => {
-  const db = loadData();
-  const user = req.session.user;
-  db[user] = { chats: [] };
-  saveData(db);
-  res.json({ status: 'cleared' });
-});
-
 app.listen(PORT, () => {
   console.log(`Server berjalan di http://0.0.0.0:${PORT}`);
 });
 EOF
 
-echo "[*] Membuat halaman login dan antarmuka chat..."
+echo "[*] Membuat halaman login dan chat dengan integrasi Puter.js..."
 cat <<'EOF' > login.html
 <!DOCTYPE html>
 <html>
@@ -141,7 +138,7 @@ cat <<'EOF' > login.html
   <h2>Login ChatGPT Mini</h2>
   <form action="/login" method="post">
     Username: <input name="username" required><br>
-    Password: <input name="password" type="password"><br>
+    Password: <input name="password" type="password"><br> <!-- password tidak dicek -->
     <button type="submit">Login</button>
   </form>
 </body>
@@ -152,25 +149,24 @@ cat <<'EOF' > index.html
 <!DOCTYPE html>
 <html>
 <head>
-  <title>ChatGPT Mini Full</title>
+  <title>ChatGPT Mini Full with Puter.js</title>
   <script src="https://js.puter.com/v2/"></script>
   <style>
     body { font-family: sans-serif; padding: 20px; }
-    pre { background: #f0f0f0; padding: 10px; border-radius: 6px; white-space: pre-wrap; }
+    pre { background: #f0f0f0; padding: 10px; border-radius: 6px; position: relative; white-space: pre-wrap; }
+    .copy-btn { position: absolute; top: 10px; right: 10px; background: #ccc; border: none; cursor: pointer; padding: 5px; }
     .chat-message { margin-bottom: 20px; }
   </style>
 </head>
 <body>
   <h1>ChatGPT Mini with Puter.js</h1>
-  <form action="/logout" method="post" style="display:inline;">
-    <button type="submit">Logout</button>
-  </form>
-  <button onclick="clearChats()">Hapus Semua Chat</button>
+  <form action="/logout" method="post"><button type="submit">Logout</button></form>
   <div id="history"></div>
   <input id="msg" placeholder="Tulis pertanyaan..." style="width: 70%;">
   <button onclick="send()">Kirim</button>
 
   <script>
+    // Muat histori chat saat halaman dibuka
     fetch('/history').then(res => res.json()).then(data => {
       for (const chat of data) {
         append(chat.q, chat.a);
@@ -182,9 +178,12 @@ cat <<'EOF' > index.html
       const chatDiv = document.createElement('div');
       chatDiv.className = 'chat-message';
 
-      let answerHTML = a
-        ? `<pre>${escapeHtml(a)}</pre>`
-        : `<pre><i>Menunggu jawaban...</i></pre>`;
+      let answerHTML = '';
+      if (a) {
+        answerHTML = `<pre>${escapeHtml(a)}<button class="copy-btn" onclick="copyToClipboard(this)">Salin</button></pre>`;
+      } else {
+        answerHTML = `<pre><i>Menunggu jawaban...</i></pre>`;
+      }
 
       chatDiv.innerHTML = `<p><b>You:</b> ${escapeHtml(q)}</p>` + answerHTML;
       div.appendChild(chatDiv);
@@ -204,8 +203,10 @@ cat <<'EOF' > index.html
       })
       .then(res => res.json())
       .then(data => {
+        // panggil puter.ai dengan prompt dari backend
         puter.ai.chat(data.prompt).then(reply => {
           append(msg, reply);
+          // kirim jawaban ke backend untuk disimpan
           fetch('/save_reply', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -215,12 +216,12 @@ cat <<'EOF' > index.html
       });
     }
 
-    function clearChats() {
-      fetch('/clear', { method: 'POST' })
-        .then(res => res.json())
-        .then(() => {
-          document.getElementById('history').innerHTML = '';
-        });
+    function copyToClipboard(button) {
+      const pre = button.parentNode;
+      const text = pre.innerText.replace('Salin', '').trim();
+      navigator.clipboard.writeText(text).then(() => {
+        alert('Teks berhasil disalin');
+      });
     }
 
     function escapeHtml(text) {
@@ -257,7 +258,8 @@ EOF
 echo "[*] Memulai service..."
 systemctl daemon-reexec
 systemctl daemon-reload
-systemctl enable chatgpt-mini
+systemctl 
+enable chatgpt-mini
 systemctl start chatgpt-mini
 
 IP=$(curl -s ifconfig.me)
@@ -265,3 +267,4 @@ echo "========================================="
 echo "ChatGPT Mini dengan Puter.js aktif!"
 echo "Akses di: http://$IP:3000/login.html"
 echo "========================================="
+
