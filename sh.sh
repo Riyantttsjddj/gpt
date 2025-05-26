@@ -18,36 +18,35 @@ echo "[*] Inisialisasi project Node.js..."
 npm init -y
 npm install express express-session body-parser
 
-echo "[*] Membuat penyimpanan memori chat menggunakan file JSON (data.json)..."
-cat <<'EOF' > data.js
-const fs = require('fs');
-const path = require('path');
-const dataFile = path.join(__dirname, 'data.json');
+echo "[*] Membuat server Express dan manajemen chat dengan file JSON..."
 
-function loadData() {
-  if (!fs.existsSync(dataFile)) {
-    fs.writeFileSync(dataFile, '{}');
-  }
-  return JSON.parse(fs.readFileSync(dataFile, 'utf8'));
-}
-
-function saveData(data) {
-  fs.writeFileSync(dataFile, JSON.stringify(data, null, 2));
-}
-
-module.exports = { loadData, saveData };
-EOF
-
-echo "[*] Membuat server Express dengan integrasi Puter.js..."
 cat <<'EOF' > server.js
 const express = require('express');
 const session = require('express-session');
 const bodyParser = require('body-parser');
+const fs = require('fs');
 const path = require('path');
-const { loadData, saveData } = require('./data');
 
 const app = express();
 const PORT = 3000;
+
+const DATA_FILE = path.join(__dirname, 'chat_data.json');
+
+// Load data chat dari file, atau buat default
+function loadData() {
+  if (!fs.existsSync(DATA_FILE)) return {};
+  try {
+    const raw = fs.readFileSync(DATA_FILE);
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+// Simpan data chat ke file
+function saveData(data) {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+}
 
 app.use(express.static(__dirname));
 app.use(bodyParser.urlencoded({ extended: false }));
@@ -70,59 +69,79 @@ app.get('/', auth, (req, res) => {
 
 app.post('/login', (req, res) => {
   const { username, password } = req.body;
-  // Untuk demo, semua login berhasil tanpa password cek
-  if (username) {
+  // Simple user auth: simpan user di file juga
+  let data = loadData();
+  if (data.users && data.users[username] && data.users[username].password === password) {
     req.session.user = username;
-    const db = loadData();
-    if (!db[username]) db[username] = { chats: [] };
-    saveData(db);
     res.redirect('/');
   } else {
     res.send('Login gagal. <a href="/login.html">Coba lagi</a>');
   }
 });
 
-app.post('/logout', (req, res) => {
+app.post('/register', (req, res) => {
+  const { username, password } = req.body;
+  let data = loadData();
+  data.users = data.users || {};
+  if (data.users[username]) {
+    res.send('Username sudah terdaftar. <a href="/login.html">Login</a>');
+  } else {
+    data.users[username] = { password };
+    data.chats = data.chats || {};
+    data.chats[username] = [];
+    saveData(data);
+    res.send('Pendaftaran berhasil. <a href="/login.html">Login</a>');
+  }
+});
+
+app.get('/logout', (req, res) => {
   req.session.destroy();
   res.redirect('/login.html');
 });
 
-app.get('/history', auth, (req, res) => {
-  const db = loadData();
-  const user = req.session.user;
-  const chats = (db[user] && db[user].chats) || [];
-  res.json(chats.slice(-20)); // 20 chat terakhir
-});
-
+// Endpoint chat: simpan pertanyaan dan jawaban (balasan)
 app.post('/chat', auth, (req, res) => {
   const user = req.session.user;
-  const msg = req.body.message;
-  const db = loadData();
-  if (!db[user]) db[user] = { chats: [] };
+  const message = req.body.message;
+  let data = loadData();
+  data.chats = data.chats || {};
+  data.chats[user] = data.chats[user] || [];
 
-  // Simpan pertanyaan dulu, jawaban kosong sementara
-  db[user].chats.push({ q: msg, a: null, timestamp: Date.now() });
-  saveData(db);
+  // Simpan pertanyaan dulu, balasan dikirim dari frontend (Puter.js)
+  data.chats[user].push({ q: message, a: null, timestamp: Date.now() });
+  saveData(data);
 
-  // Kirim prompt ke frontend supaya panggil Puter.js
-  res.json({ prompt: msg });
+  res.json({ status: 'ok' });
 });
 
+// Endpoint menyimpan balasan AI setelah dari frontend
 app.post('/save_reply', auth, (req, res) => {
-  const { question, answer } = req.body;
   const user = req.session.user;
-  const db = loadData();
-  if (!db[user]) db[user] = { chats: [] };
+  const { question, answer } = req.body;
+  let data = loadData();
+  data.chats = data.chats || {};
+  data.chats[user] = data.chats[user] || [];
 
-  // Cari pertanyaan terakhir yang sama dan belum ada jawaban
-  for (let i = db[user].chats.length - 1; i >= 0; i--) {
-    if (db[user].chats[i].q === question && !db[user].chats[i].a) {
-      db[user].chats[i].a = answer;
+  // Cari entry terakhir dengan a=null dan q=question lalu update jawabannya
+  for (let i = data.chats[user].length -1; i >= 0; i--) {
+    if (data.chats[user][i].q === question && data.chats[user][i].a === null) {
+      data.chats[user][i].a = answer;
       break;
     }
   }
-  saveData(db);
+  saveData(data);
   res.json({ status: 'ok' });
+});
+
+// Kirim history chat user (max 20 terakhir)
+app.get('/history', auth, (req, res) => {
+  const user = req.session.user;
+  let data = loadData();
+  data.chats = data.chats || {};
+  let history = data.chats[user] || [];
+  history = history.filter(c => c.a !== null);
+  history = history.slice(-20);
+  res.json(history);
 });
 
 app.listen(PORT, () => {
@@ -130,109 +149,131 @@ app.listen(PORT, () => {
 });
 EOF
 
-echo "[*] Membuat halaman login dan chat dengan integrasi Puter.js..."
-cat <<'EOF' > login.html
+echo "[*] Membuat halaman login dan register..."
+cat <<EOF > login.html
 <!DOCTYPE html>
-<html>
-<body>
-  <h2>Login ChatGPT Mini</h2>
-  <form action="/login" method="post">
-    Username: <input name="username" required><br>
-    Password: <input name="password" type="password"><br> <!-- password tidak dicek -->
-    <button type="submit">Login</button>
-  </form>
-</body>
-</html>
+<html><body>
+<h2>Login</h2>
+<form action="/login" method="post">
+  Username: <input name="username" required><br>
+  Password: <input name="password" type="password" required><br>
+  <button type="submit">Login</button>
+</form>
+<p>Belum punya akun? <a href="/register.html">Daftar</a></p>
+</body></html>
 EOF
+
+cat <<EOF > register.html
+<!DOCTYPE html>
+<html><body>
+<h2>Daftar</h2>
+<form action="/register" method="post">
+  Username: <input name="username" required><br>
+  Password: <input name="password" type="password" required><br>
+  <button type="submit">Daftar</button>
+</form>
+</body></html>
+EOF
+
+echo "[*] Membuat halaman chat dengan Puter.js..."
 
 cat <<'EOF' > index.html
 <!DOCTYPE html>
 <html>
 <head>
-  <title>ChatGPT Mini Full with Puter.js</title>
-  <script src="https://js.puter.com/v2/"></script>
+  <title>ChatGPT Mini with Puter.js</title>
   <style>
-    body { font-family: sans-serif; padding: 20px; }
-    pre { background: #f0f0f0; padding: 10px; border-radius: 6px; position: relative; white-space: pre-wrap; }
+    body { font-family: sans-serif; padding: 20px; max-width: 700px; margin: auto;}
+    pre { background: #f0f0f0; padding: 10px; border-radius: 6px; position: relative; white-space: pre-wrap; word-wrap: break-word; }
     .copy-btn { position: absolute; top: 10px; right: 10px; background: #ccc; border: none; cursor: pointer; padding: 5px; }
-    .chat-message { margin-bottom: 20px; }
+    #history p { margin-bottom: 0; }
   </style>
 </head>
 <body>
   <h1>ChatGPT Mini with Puter.js</h1>
-  <form action="/logout" method="post"><button type="submit">Logout</button></form>
+  <a href="/logout">Logout</a>
   <div id="history"></div>
-  <input id="msg" placeholder="Tulis pertanyaan..." style="width: 70%;">
+  <input id="msg" placeholder="Tulis pertanyaan..." style="width: 80%;" autocomplete="off" />
   <button onclick="send()">Kirim</button>
 
+  <script src="https://js.puter.com/v2/"></script>
   <script>
-    // Muat histori chat saat halaman dibuka
-    fetch('/history').then(res => res.json()).then(data => {
-      for (const chat of data) {
-        append(chat.q, chat.a);
-      }
-    });
+    let chatHistory = [];
 
     function append(q, a) {
       const div = document.getElementById('history');
-      const chatDiv = document.createElement('div');
-      chatDiv.className = 'chat-message';
+      // Tambah user message
+      const pUser = document.createElement('p');
+      pUser.innerHTML = '<b>You:</b> ' + q;
+      div.appendChild(pUser);
 
-      let answerHTML = '';
-      if (a) {
-        answerHTML = `<pre>${escapeHtml(a)}<button class="copy-btn" onclick="copyToClipboard(this)">Salin</button></pre>`;
-      } else {
-        answerHTML = `<pre><i>Menunggu jawaban...</i></pre>`;
-      }
+      // Tambah AI balasan dengan tombol salin
+      const pre = document.createElement('pre');
+      pre.textContent = a;
 
-      chatDiv.innerHTML = `<p><b>You:</b> ${escapeHtml(q)}</p>` + answerHTML;
-      div.appendChild(chatDiv);
+      const btn = document.createElement('button');
+      btn.textContent = 'Salin';
+      btn.className = 'copy-btn';
+      btn.onclick = () => {
+        navigator.clipboard.writeText(a);
+        btn.textContent = 'Disalin!';
+        setTimeout(() => btn.textContent = 'Salin', 1500);
+      };
+
+      const wrapper = document.createElement('div');
+      wrapper.style.position = 'relative';
+      wrapper.appendChild(pre);
+      wrapper.appendChild(btn);
+
+      div.appendChild(wrapper);
       div.scrollTop = div.scrollHeight;
     }
 
-    function send() {
-      const msgElem = document.getElementById('msg');
-      const msg = msgElem.value.trim();
-      if (!msg) return alert('Isi pesan dulu');
-      msgElem.value = '';
+    function loadHistory() {
+      fetch('/history').then(r => r.json()).then(data => {
+        chatHistory = data;
+        for (const c of data) {
+          append(c.q, c.a);
+        }
+      });
+    }
 
-      fetch('/chat', {
+    async function send() {
+      const input = document.getElementById('msg');
+      const msg = input.value.trim();
+      if (!msg) return alert('Isi pesan dulu');
+      input.value = '';
+
+      // Kirim pesan ke backend dulu (disimpan)
+      await fetch('/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: msg })
-      })
-      .then(res => res.json())
-      .then(data => {
-        // panggil puter.ai dengan prompt dari backend
-        puter.ai.chat(data.prompt).then(reply => {
-          append(msg, reply);
-          // kirim jawaban ke backend untuk disimpan
-          fetch('/save_reply', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ question: msg, answer: reply })
-          });
+      });
+
+      // Buat prompt gabungan dari history + pesan baru
+      let fullPrompt = '';
+      for (const chat of chatHistory) {
+        fullPrompt += `User: ${chat.q}\nAI: ${chat.a}\n`;
+      }
+      fullPrompt += `User: ${msg}\nAI:`;
+
+      // Panggil Puter.js dengan prompt lengkap
+      puter.ai.chat(fullPrompt).then(reply => {
+        append(msg, reply);
+
+        // Simpan balasan ke backend
+        fetch('/save_reply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question: msg, answer: reply })
         });
+
+        chatHistory.push({ q: msg, a: reply });
       });
     }
 
-    function copyToClipboard(button) {
-      const pre = button.parentNode;
-      const text = pre.innerText.replace('Salin', '').trim();
-      navigator.clipboard.writeText(text).then(() => {
-        alert('Teks berhasil disalin');
-      });
-    }
-
-    function escapeHtml(text) {
-      return text.replace(/[&<>"']/g, (m) => ({
-        '&': '&amp;',
-        '<': '&lt;',
-        '>': '&gt;',
-        '"': '&quot;',
-        "'": '&#39;'
-      })[m]);
-    }
+    loadHistory();
   </script>
 </body>
 </html>
@@ -241,7 +282,7 @@ EOF
 echo "[*] Membuat systemd service..."
 cat <<EOF > /etc/systemd/system/chatgpt-mini.service
 [Unit]
-Description=ChatGPT Mini with Puter.js
+Description=ChatGPT Mini Puter.js
 After=network.target
 
 [Service]
@@ -255,16 +296,13 @@ WorkingDirectory=/opt/chatgpt-mini-full
 WantedBy=multi-user.target
 EOF
 
-echo "[*] Memulai service..."
 systemctl daemon-reexec
 systemctl daemon-reload
-systemctl 
-enable chatgpt-mini
+systemctl enable chatgpt-mini
 systemctl start chatgpt-mini
 
 IP=$(curl -s ifconfig.me)
 echo "========================================="
-echo "ChatGPT Mini dengan Puter.js aktif!"
+echo "ChatGPT Mini Puter.js aktif!"
 echo "Akses di: http://$IP:3000/login.html"
 echo "========================================="
-
